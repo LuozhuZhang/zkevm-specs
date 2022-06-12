@@ -164,7 +164,7 @@ class Instruction:
                 "call_id",
                 "is_root",
                 "is_create",
-                "code_source",
+                "code_hash",
                 "program_counter",
                 "stack_pointer",
                 "gas_left",
@@ -209,7 +209,7 @@ class Instruction:
         call_id: Transition,
         is_root: Transition,
         is_create: Transition,
-        code_source: Transition,
+        code_hash: Transition,
         gas_left: Transition,
         reversible_write_counter: Transition,
         log_id: Transition,
@@ -219,7 +219,7 @@ class Instruction:
             call_id=call_id,
             is_root=is_root,
             is_create=is_create,
-            code_source=code_source,
+            code_hash=code_hash,
             gas_left=gas_left,
             reversible_write_counter=reversible_write_counter,
             log_id=log_id,
@@ -257,7 +257,7 @@ class Instruction:
             call_id=Transition.same(),
             is_root=Transition.same(),
             is_create=Transition.same(),
-            code_source=Transition.same(),
+            code_hash=Transition.same(),
         )
 
     def sum(self, values: Sequence[IntOrFQ]) -> FQ:
@@ -321,21 +321,63 @@ class Instruction:
             raise ConstraintUnsatFailure(f"Word {word} has too many bytes to fit {n_bytes} bytes")
         return self.bytes_to_fq(word.le_bytes[:n_bytes])
 
+    def mul_add_words_512(self, a: RLC, b: RLC, c: RLC, d: RLC, e: RLC):
+        """
+        The function constrains a * b + c == d * 2**256 + e, where a, b, c, d are 256-bit words.
+        """
+        a64s = self.word_to_64s(a)
+        b64s = self.word_to_64s(b)
+        c_lo, c_hi = self.word_to_lo_hi(c)
+        d_lo, d_hi = self.word_to_lo_hi(d)
+        e_lo, e_hi = self.word_to_lo_hi(e)
+
+        t0 = a64s[0] * b64s[0]
+        t1 = a64s[0] * b64s[1] + a64s[1] * b64s[0]
+        t2 = a64s[0] * b64s[2] + a64s[1] * b64s[1] + a64s[2] * b64s[0]
+        t3 = a64s[0] * b64s[3] + a64s[1] * b64s[2] + a64s[2] * b64s[1] + a64s[3] * b64s[0]
+
+        t4 = a64s[1] * b64s[3] + a64s[2] * b64s[2] + a64s[3] * b64s[1]
+        t5 = a64s[2] * b64s[3] + a64s[3] * b64s[2]
+        t6 = a64s[3] * b64s[3]
+
+        carry_0 = (t0 + t1 * (2**64) + c_lo - e_lo) / (2**128)
+        carry_1 = (t2 + t3 * (2**64) + c_hi + carry_0 - e_hi) / (2**128)
+        carry_2 = (t4 + t5 * (2**64) + carry_1 - d_lo) / (2**128)
+
+        # range check for carries
+        self.range_check(carry_0, 9)
+        self.range_check(carry_1, 9)
+        self.range_check(carry_2, 9)
+
+        self.constrain_equal(t0 + t1 * (2**64) + c_lo, e_lo + carry_0 * (2**128))
+        self.constrain_equal(t2 + t3 * (2**64) + c_hi + carry_0, e_hi + carry_1 * (2**128))
+        self.constrain_equal(t4 + t5 * (2**64) + carry_1, d_lo + carry_2 * (2**128))
+        self.constrain_equal(t6 + carry_2, d_hi)
+
     def word_is_zero(self, word: RLC) -> FQ:
         assert len(word.le_bytes) == 32, "Expected word to contain 32 bytes"
         return self.is_zero(self.sum(word.le_bytes))
 
-    def word_to_lo_hi(self, word: RLC) -> Tuple[FQ, FQ]:
+    def word_to_lo_hi(self, word: RLC, constrained=False) -> Tuple[FQ, FQ]:
         assert len(word.le_bytes) == 32, "Expected word to contain 32 bytes"
-        return self.bytes_to_fq(word.le_bytes[:16]), self.bytes_to_fq(word.le_bytes[16:])
+        return self.bytes_to_fq(word.le_bytes[:16], constrained), self.bytes_to_fq(
+            word.le_bytes[16:], constrained
+        )
 
     def word_to_64s(self, word: RLC) -> Tuple[FQ, ...]:
         assert len(word.le_bytes) == 32, "Expected word to contain 32 bytes"
         return tuple(self.bytes_to_fq(word.le_bytes[8 * i : 8 * (i + 1)]) for i in range(4))
 
-    def bytes_to_fq(self, value: bytes) -> FQ:
+    def bytes_to_fq(self, value: bytes, constrained=False) -> FQ:
         assert len(value) <= MAX_N_BYTES, "Too many bytes to composite an integer in field"
-        return FQ(int.from_bytes(value, "little"))
+
+        fq = FQ(int.from_bytes(value, "little"))
+
+        if constrained:
+            expr = sum(list(map(lambda x: (256 ** x[0]) * x[1], enumerate(list(value)))))
+            self.constrain_equal(fq, FQ(expr))
+
+        return fq
 
     def rlc_encode(self, value: Union[FQ, int, bytes], n_bytes: int = None) -> RLC:
         if isinstance(value, FQ):
@@ -451,14 +493,14 @@ class Instruction:
 
     # look up tx log fields (Data, Address, Topic),
     def tx_log_lookup(
-        self, tx_id: Expression, field_tag: TxLogFieldTag, index: int = 0
+        self, tx_id: Expression, log_id: Expression, field_tag: TxLogFieldTag, index: int = 0
     ) -> Expression:
         # evm only write tx log
         value = self.rw_lookup(
             RW.Write,
             RWTableTag.TxLog,
             key1=tx_id,
-            key2=self.curr.log_id,
+            key2=log_id,
             key3=FQ(field_tag),
             key4=FQ(index),
         ).value
@@ -509,7 +551,7 @@ class Instruction:
                 "The opcode source when is_root and is_create (root creation call) is not determined yet"
             )
         else:
-            return self.bytecode_lookup(self.curr.code_source, index, FQ(is_code)).expr()
+            return self.bytecode_lookup(self.curr.code_hash, index, FQ(is_code)).expr()
 
     def rw_lookup(
         self,
@@ -522,7 +564,6 @@ class Instruction:
         value: Expression = None,
         value_prev: Expression = None,
         aux0: Expression = None,
-        aux1: Expression = None,
         rw_counter: Expression = None,
     ) -> RWTableRow:
         if rw_counter is None:
@@ -540,7 +581,6 @@ class Instruction:
             value,
             value_prev,
             aux0,
-            aux1,
         )
 
     def state_write(
@@ -553,12 +593,11 @@ class Instruction:
         value: Expression = None,
         value_prev: Expression = None,
         aux0: Expression = None,
-        aux1: Expression = None,
         reversion_info: ReversionInfo = None,
     ) -> RWTableRow:
         assert tag.write_with_reversion()
 
-        row = self.rw_lookup(RW.Write, tag, key1, key2, key3, key4, value, value_prev, aux0, aux1)
+        row = self.rw_lookup(RW.Write, tag, key1, key2, key3, key4, value, value_prev, aux0)
 
         if reversion_info is not None and reversion_info.is_persistent == FQ(0):
             self.tables.rw_lookup(
@@ -573,7 +612,6 @@ class Instruction:
                 value=row.value_prev,
                 value_prev=row.value,
                 aux0=row.aux0,
-                aux1=row.aux1,
             )
 
         return row
@@ -645,7 +683,7 @@ class Instruction:
     def account_read(self, account_address: Expression, account_field_tag: AccountFieldTag) -> RLC:
         return cast_expr(
             self.rw_lookup(
-                RW.Read, RWTableTag.Account, account_address, FQ(account_field_tag)
+                RW.Read, RWTableTag.Account, key2=account_address, key3=FQ(account_field_tag)
             ).value,
             RLC,
         )
@@ -658,8 +696,8 @@ class Instruction:
     ) -> Tuple[Expression, Expression]:
         row = self.state_write(
             RWTableTag.Account,
-            account_address,
-            FQ(account_field_tag),
+            key2=account_address,
+            key3=FQ(account_field_tag),
             reversion_info=reversion_info,
         )
         return row.value, row.value_prev
@@ -700,9 +738,10 @@ class Instruction:
         row = self.rw_lookup(
             RW.Read,
             RWTableTag.AccountStorage,
+            tx_id,
             account_address,
-            storage_key,
-            aux0=tx_id,
+            key3=None,
+            key4=storage_key,
         )
         return cast_expr(row.value, RLC)
 
@@ -715,12 +754,13 @@ class Instruction:
     ) -> Tuple[RLC, RLC, RLC]:
         row = self.state_write(
             RWTableTag.AccountStorage,
+            tx_id,
             account_address,
-            storage_key,
-            aux0=tx_id,
+            key3=None,
+            key4=storage_key,
             reversion_info=reversion_info,
         )
-        return cast_expr(row.value, RLC), cast_expr(row.value_prev, RLC), cast_expr(row.aux1, RLC)
+        return cast_expr(row.value, RLC), cast_expr(row.value_prev, RLC), cast_expr(row.aux0, RLC)
 
     def add_account_to_access_list(
         self, tx_id: Expression, account_address: Expression, reversion_info: ReversionInfo = None
@@ -836,3 +876,6 @@ class Instruction:
         gas_cost = word_size * GAS_COST_COPY + memory_expansion_gas_cost
         self.range_check(gas_cost, N_BYTES_GAS)
         return gas_cost
+
+    def pow2_lookup(self, value: Expression, value_pow: Expression):
+        self.fixed_lookup(FixedTableTag.Pow2, value, value_pow)

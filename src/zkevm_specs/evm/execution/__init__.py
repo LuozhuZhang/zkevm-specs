@@ -11,6 +11,7 @@ from .copy_to_log import *
 
 # Opcode's successful cases
 from .add_sub import *
+from .addmod import *
 from .block_ctx import *
 from .call import *
 from .calldatasize import *
@@ -19,6 +20,7 @@ from .callvalue import *
 from .calldatacopy import *
 from .calldataload import *
 from .codecopy import *
+from .codesize import *
 from .gas import *
 from .iszero import *
 from .jump import *
@@ -33,6 +35,7 @@ from .storage import *
 from .selfbalance import *
 from .extcodehash import *
 from .log import *
+from .shr import *
 
 
 EXECUTION_STATE_IMPL: Dict[ExecutionState, Callable] = {
@@ -42,6 +45,7 @@ EXECUTION_STATE_IMPL: Dict[ExecutionState, Callable] = {
     ExecutionState.CopyCodeToMemory: copy_code_to_memory,
     ExecutionState.CopyToMemory: copy_to_memory,
     ExecutionState.ADD: add_sub,
+    ExecutionState.ADDMOD: addmod,
     ExecutionState.MUL: mul_div_mod,
     ExecutionState.ORIGIN: origin,
     ExecutionState.CALLER: caller,
@@ -50,6 +54,7 @@ EXECUTION_STATE_IMPL: Dict[ExecutionState, Callable] = {
     ExecutionState.CALLDATALOAD: calldataload,
     ExecutionState.CALLDATASIZE: calldatasize,
     ExecutionState.CODECOPY: codecopy,
+    ExecutionState.CODESIZE: codesize,
     ExecutionState.BlockCtx: blockctx,
     ExecutionState.JUMP: jump,
     ExecutionState.JUMPI: jumpi,
@@ -65,4 +70,5 @@ EXECUTION_STATE_IMPL: Dict[ExecutionState, Callable] = {
     ExecutionState.LOG: log,
     ExecutionState.CALL: call,
     ExecutionState.ISZERO: iszero,
+    ExecutionState.SHR: shr,
 }
